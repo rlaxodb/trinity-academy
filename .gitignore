@@ -1,0 +1,6 @@
+supabase-config.js
+data.json
+.env
+.env.*
+__pycache__/
+*.py[cod]
