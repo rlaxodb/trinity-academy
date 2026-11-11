@@ -76,6 +76,16 @@ function App() {
   const [profile, setProfile] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState("");
+  const [accountPending, setAccountPending] = useState(false);
+  const [isInvitationFlow, setIsInvitationFlow] = useState(() => {
+    const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    const isInvite = hashParams.get("type") === "invite" ||
+      new URLSearchParams(window.location.search).get("type") === "invite";
+    if (isInvite) window.sessionStorage.setItem("trinity_invitation_flow", "true");
+    return isInvite || window.sessionStorage.getItem("trinity_invitation_flow") === "true";
+  });
+  const [newPassword, setNewPassword] = useState("");
+  const [newPasswordConfirm, setNewPasswordConfirm] = useState("");
   const [dataReady, setDataReady] = useState(false);
 
   // Kiosk Mode State (Tablet entrance attendance screen)
@@ -93,6 +103,7 @@ function App() {
   const isAdminLoggedIn = currentRole === "admin";
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
+  const [showInviteHelp, setShowInviteHelp] = useState(false);
 
   // Locked mode for direct student/teacher links (hides role switchers & other students)
   const [shareModalData, setShareModalData] = useState(null);
@@ -194,34 +205,40 @@ function App() {
   useEffect(() => {
     let active = true;
     setProfile(null);
+    setAccountPending(false);
     setDataReady(false);
     setTeachers([]);
     setStudents([]);
     setAttendances([]);
     setGrowthReports([]);
-    if (!supabase || !authSession) return undefined;
+    if (!supabase || !authSession || isInvitationFlow) return undefined;
     supabase.from("profiles").select("role,teacher_id,student_id")
-      .eq("id", authSession.user.id).single()
+      .eq("id", authSession.user.id).maybeSingle()
       .then(({ data, error }) => {
         if (error) throw error;
-        if (!data || !["admin", "teacher", "parent"].includes(data.role)) {
+        if (!data) {
+          if (active) setAccountPending(true);
+          return;
+        }
+        if (!["admin", "teacher", "parent"].includes(data.role)) {
           throw new Error("This account has no valid academy role assignment.");
         }
         if (active) {
+          setAccountPending(false);
           setProfile(data);
           setActiveTab(data.role === "admin" ? "teachers" : data.role === "teacher" ? "my_students" : "parent_overview");
         }
       })
       .catch((error) => {
         console.error("Profile lookup failed:", error);
-        if (active) setAuthError("계정 권한이 등록되지 않았습니다. 학원 관리자에게 Supabase 프로필 등록을 요청해주세요.");
+        if (active) setAuthError("계정 권한을 확인하지 못했습니다. 잠시 후 다시 시도하거나 관리자에게 문의해주세요.");
       });
     return () => { active = false; };
-  }, [supabase, authSession]);
+  }, [supabase, authSession, isInvitationFlow]);
 
   useEffect(() => {
     let active = true;
-    if (!supabase || !authSession || !profile) return undefined;
+    if (!supabase || !authSession || !profile || isInvitationFlow) return undefined;
     const loadData = async () => {
       try {
         const [tRes, pRes, sRes, aRes, gRes] = await Promise.all([
@@ -272,7 +289,7 @@ function App() {
     };
     loadData();
     return () => { active = false; };
-  }, [supabase, authSession, profile]);
+  }, [supabase, authSession, profile, isInvitationFlow]);
 
   const syncToServer = async (updatedTeachers, updatedStudents, updatedAttendances, updatedReports) => {
     if (!supabase || !authSession || !profile || !dataReady || profile.role === "parent") return;
@@ -383,6 +400,38 @@ ${link}
     }
   };
 
+  const clearInvitationFlow = () => {
+    window.sessionStorage.removeItem("trinity_invitation_flow");
+    const callbackUrl = new URL(window.location.href);
+    ["type", "token_hash", "code", "error", "error_description"].forEach(key => callbackUrl.searchParams.delete(key));
+    callbackUrl.hash = "";
+    window.history.replaceState(null, "", `${callbackUrl.pathname}${callbackUrl.search}`);
+    setIsInvitationFlow(false);
+  };
+
+  const handleCompleteInvitation = async (event) => {
+    event.preventDefault();
+    setAuthError("");
+    if (!supabase) {
+      setAuthError("Supabase 설정을 찾을 수 없습니다. 배포 설정 파일을 확인해주세요.");
+      return;
+    }
+    if (newPassword !== newPasswordConfirm) {
+      setAuthError("비밀번호 확인이 일치하지 않습니다.");
+      return;
+    }
+    try {
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) throw error;
+      setNewPassword("");
+      setNewPasswordConfirm("");
+      clearInvitationFlow();
+    } catch (error) {
+      console.error("Invitation password setup failed:", error);
+      setAuthError("초대 계정을 설정하지 못했습니다. 초대 링크가 유효한지, 새 비밀번호가 Supabase 정책을 충족하는지 확인해주세요.");
+    }
+  };
+
   const handleSignOut = async () => {
     if (!supabase) return;
     setProfile(null);
@@ -391,9 +440,12 @@ ${link}
     setStudents([]);
     setAttendances([]);
     setGrowthReports([]);
+    setAccountPending(false);
     try {
       const { error } = await supabase.auth.signOut();
       if (error) throw error;
+      setIsInvitationFlow(false);
+      window.sessionStorage.removeItem("trinity_invitation_flow");
     } catch (error) {
       console.error("Supabase sign-out failed:", error);
       setAuthError("로그아웃하지 못했습니다. 다시 시도해주세요.");
@@ -993,30 +1045,77 @@ ${link}
         {/* ========================================================================= */}
         {/* ADMIN VIEWS (Protected by Login Screen)                                   */}
         {/* ========================================================================= */}
-        {!authSession && (
+        {!authSession && !isInvitationFlow && (
           <div className="min-h-[70vh] flex items-center justify-center py-8">
             <div className="max-w-md w-full bg-white rounded-3xl p-6 sm:p-8 border border-slate-200 shadow-xl space-y-5">
               <div className="text-center">
                 <h2 className="text-xl font-black text-slate-900">트리니티 음악학원</h2>
-                <p className="text-xs text-slate-500 mt-2">Supabase 계정으로 로그인하세요. 공유 링크로 인증을 우회할 수 없습니다.</p>
+                <p className="text-xs text-slate-500 mt-2">Supabase 계정으로 로그인하세요. 선생님 계정은 관리자가 발급한 초대 링크로만 등록할 수 있습니다.</p>
               </div>
               {authLoading && <p className="text-sm text-center text-slate-500">인증 상태 확인 중...</p>}
               {!supabase && <p className="p-3 bg-amber-50 border border-amber-200 text-amber-800 text-xs rounded-xl">Supabase 연결 설정이 없습니다. 배포 환경에 supabase-config.js를 추가해주세요.</p>}
               {authError && <p role="alert" className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-xl">{authError}</p>}
-              <form onSubmit={handleSignIn} className="space-y-3">
-                <label className="block text-xs font-bold text-slate-700">이메일
-                  <input type="email" required autoComplete="username" value={loginEmail} onChange={event => setLoginEmail(event.target.value)} className="mt-1 w-full px-3 py-2.5 border border-slate-300 rounded-xl" />
-                </label>
-                <label className="block text-xs font-bold text-slate-700">비밀번호
-                  <input type="password" required autoComplete="current-password" value={loginPassword} onChange={event => setLoginPassword(event.target.value)} className="mt-1 w-full px-3 py-2.5 border border-slate-300 rounded-xl" />
-                </label>
-                <p className="text-[11px] text-slate-500">로그인 세션은 최대 7일간 유지됩니다. 접근 권한은 서버의 Supabase 프로필과 RLS 정책으로 결정됩니다.</p>
-                <button type="submit" disabled={!supabase || authLoading} className="w-full py-3 bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white rounded-xl font-black text-sm">로그인</button>
-              </form>
+              {showInviteHelp ? (
+                <div className="space-y-3">
+                  <h3 className="font-bold text-slate-800">선생님 초대 등록</h3>
+                  <p className="text-xs leading-relaxed text-slate-600">선생님 계정은 공개 회원가입으로 만들 수 없습니다. 학원 관리자에게 초대를 요청하세요. 관리자가 Supabase Auth 초대를 보내고 계정과 교사 정보를 연결하면, 이메일의 초대 링크에서 비밀번호를 설정할 수 있습니다.</p>
+                  <button type="button" onClick={() => setShowInviteHelp(false)} className="w-full py-2 text-xs font-bold text-brand-700 hover:bg-brand-50 rounded-xl">로그인으로 돌아가기</button>
+                </div>
+              ) : (
+                <>
+                  <form onSubmit={handleSignIn} className="space-y-3">
+                    <label className="block text-xs font-bold text-slate-700">이메일
+                      <input type="email" required autoComplete="username" value={loginEmail} onChange={event => setLoginEmail(event.target.value)} className="mt-1 w-full px-3 py-2.5 border border-slate-300 rounded-xl" />
+                    </label>
+                    <label className="block text-xs font-bold text-slate-700">비밀번호
+                      <input type="password" required autoComplete="current-password" value={loginPassword} onChange={event => setLoginPassword(event.target.value)} className="mt-1 w-full px-3 py-2.5 border border-slate-300 rounded-xl" />
+                    </label>
+                    <p className="text-[11px] text-slate-500">로그인 세션은 최대 7일간 유지됩니다. 접근 권한은 서버의 Supabase 프로필과 RLS 정책으로 결정됩니다.</p>
+                    <button type="submit" disabled={!supabase || authLoading} className="w-full py-3 bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white rounded-xl font-black text-sm">로그인</button>
+                  </form>
+                  <button type="button" onClick={() => setShowInviteHelp(true)} className="w-full py-2 text-xs font-bold text-brand-700 hover:bg-brand-50 rounded-xl">
+                    선생님 초대 등록 방법
+                  </button>
+                </>
+              )}
             </div>
           </div>
         )}
-        {authSession && !profile && (
+        {!authSession && isInvitationFlow && (
+          <div className="max-w-xl mx-auto mt-12 p-5 bg-white border border-brand-200 rounded-2xl space-y-3">
+            <h2 className="font-bold text-slate-900">초대 링크 확인 중</h2>
+            <p className="text-sm text-slate-700">Supabase가 초대 링크를 확인하고 있습니다. 링크가 만료되었거나 이미 사용되었다면 관리자에게 새 초대를 요청해주세요.</p>
+            {authLoading && <p className="text-sm text-slate-500">인증 상태 확인 중...</p>}
+            {!supabase && <p role="alert" className="p-3 bg-amber-50 border border-amber-200 text-amber-800 text-xs rounded-xl">Supabase 연결 설정이 없어 초대를 확인할 수 없습니다. 배포 설정 파일을 확인해주세요.</p>}
+            {authError && <p role="alert" className="text-sm text-red-700">{authError}</p>}
+            <button type="button" onClick={clearInvitationFlow} className="text-xs font-bold text-brand-700 hover:underline">로그인 화면으로 돌아가기</button>
+          </div>
+        )}
+        {authSession && isInvitationFlow && (
+          <div className="max-w-xl mx-auto mt-12 p-5 bg-white border border-brand-200 rounded-2xl space-y-4">
+            <h2 className="font-bold text-slate-900">선생님 계정 등록</h2>
+            <p className="text-sm text-slate-700">{authSession.user.email} 초대 계정에 사용할 비밀번호를 설정하세요. 등록된 역할과 담당 학생은 관리자가 미리 연결하며, 이 화면에서는 권한이나 학원 데이터를 변경하지 않습니다.</p>
+            {authError && <p role="alert" className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-xl">{authError}</p>}
+            <form onSubmit={handleCompleteInvitation} className="space-y-3">
+              <label className="block text-xs font-bold text-slate-700">새 비밀번호
+                <input type="password" required autoComplete="new-password" value={newPassword} onChange={event => setNewPassword(event.target.value)} className="mt-1 w-full px-3 py-2.5 border border-slate-300 rounded-xl" />
+              </label>
+              <label className="block text-xs font-bold text-slate-700">비밀번호 확인
+                <input type="password" required autoComplete="new-password" value={newPasswordConfirm} onChange={event => setNewPasswordConfirm(event.target.value)} className="mt-1 w-full px-3 py-2.5 border border-slate-300 rounded-xl" />
+              </label>
+              <button type="submit" disabled={!supabase} className="w-full py-3 bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white rounded-xl font-black text-sm">비밀번호 설정 후 계속</button>
+            </form>
+            <button type="button" onClick={handleSignOut} className="text-xs font-bold text-slate-500 hover:underline">초대 취소하고 로그아웃</button>
+          </div>
+        )}
+        {authSession && accountPending && (
+          <div className="max-w-xl mx-auto mt-12 p-5 bg-white border border-amber-200 rounded-2xl space-y-3">
+            <h2 className="font-bold text-slate-900">계정 권한 등록이 필요합니다</h2>
+            <p className="text-sm text-slate-700">이 계정에 연결된 교사 프로필이 없습니다. 관리자가 Supabase에서 계정과 교사 정보를 연결할 때까지 학원 데이터 접근은 차단됩니다.</p>
+            <button type="button" onClick={handleSignOut} className="px-3 py-2 text-xs font-bold text-red-700 bg-red-50 rounded-lg">로그아웃</button>
+          </div>
+        )}
+        {authSession && !profile && !accountPending && (
           <div className="max-w-xl mx-auto mt-12 p-5 bg-white border border-slate-200 rounded-2xl text-sm text-slate-700">
             {authError || "계정 권한을 확인하고 있습니다..."}
           </div>

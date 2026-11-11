@@ -8,9 +8,9 @@ student or staff records.
 ## Configure Supabase
 
 1. Create a Supabase project and run `supabase_schema.sql` in its SQL editor.
-2. In **Authentication → Providers**, enable email/password sign-in and disable
-   public sign-ups. Add each staff/parent account yourself in the Supabase Auth
-   dashboard.
+2. In **Authentication → Providers**, enable email/password sign-in and keep
+   public sign-ups disabled. Create teacher invitations from the Supabase Auth
+   dashboard or a trusted administrator workflow.
 3. Add academy records using the Supabase dashboard. Create each user's
    `public.profiles` row from the SQL editor, assigning `admin`, `teacher`, or
    `parent` and the matching `teacher_id` or `student_id` where applicable.
@@ -26,6 +26,27 @@ academy records; teachers are scoped to their assigned teacher ID; parents are
 scoped to their linked student ID. Teacher payout account details are stored in
 a separate table that parents cannot read. The seven-day client session limit
 is a convenience only; Supabase Auth token expiry and RLS enforce access.
+
+Teacher registration is invitation-only. In **Authentication → Users**, an
+administrator invites the teacher's email, then uses a trusted admin workflow
+to link the resulting Auth user UUID to the teacher record (the reported live
+schema has `teachers.auth_user_id`) and provision the matching profile under
+the existing schema and RLS rules. Complete that linkage before the teacher
+opens the email invite. The invite link opens a password setup screen; the
+browser updates only the invited user's password and never creates an Auth
+user, teacher row, profile, or role. Accounts without a valid profile remain
+blocked from academy data.
+
+The app's current profile/data mapping expects `profiles.role`,
+`profiles.teacher_id`, and `profiles.student_id`, plus a
+`teacher_payment_details` table with `teacher_id` and `bank_account`. The
+reported existing project instead has additional `teachers.auth_user_id`,
+different role/helper names, and a `teacher_payment_details` ledger shape.
+These schemas have not been reconciled, so this frontend is not yet compatible
+with the reported live project for production use. Review and approve a
+migration and client mapping before connecting this app or inviting real
+teachers; do not run this repository's schema over an existing database or
+weaken its RLS policies.
 
 ## Run locally
 
